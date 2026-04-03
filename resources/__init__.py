@@ -1,6 +1,4 @@
 from .apns import APNSRotator
-from .azure_ad import AzureADRotator
-from .azure_openai import AzureOpenAIRotator
 from .cloudflare import CloudflareRotator
 from .elasticache import ElastiCacheRotator
 from .elasticsearch import ElasticsearchRotator
@@ -18,8 +16,6 @@ __all__ = [
     "CloudflareRotator",
     "MongoDBRotator",
     "PostgresRotator",
-    "AzureADRotator",
-    "AzureOpenAIRotator",
     "APNSRotator",
     "SimpleRotator",
     "rotate_all_simple",

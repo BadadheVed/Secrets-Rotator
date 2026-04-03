@@ -16,8 +16,6 @@ import rollback
 from rollback import RotationSession
 from resources import (
     APNSRotator,
-    AzureADRotator,
-    AzureOpenAIRotator,
     CloudflareRotator,
     ElastiCacheRotator,
     ElasticsearchRotator,
@@ -79,14 +77,12 @@ MENU = """\
   3. Firebase
   4. Cloudflare
   5. MongoDB Atlas
-  6. Azure AD
-  7. Azure OpenAI
-  8. Apple APNS                   (can't be done programmatically)
-  9. Deepgram                     (programmatic)
- 10. Anthropic                    (can't be done programmatically)
- 11. OpenAI                       (can't be done programmatically)
- 12. Gemini                       (can't be done programmatically)
- 13. Elasticsearch
+  6. Apple APNS                   (can't be done programmatically)
+  7. Deepgram                     (programmatic)
+  8. Anthropic                    (can't be done programmatically)
+  9. OpenAI                       (can't be done programmatically)
+ 10. Gemini                       (can't be done programmatically)
+ 11. Elasticsearch
   0. Rotate ALL
 
   q. Quit

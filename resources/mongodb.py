@@ -58,7 +58,7 @@ class MongoDBRotator:
         with httpx.Client(timeout=30) as client:
             resp = client.patch(
                 url,
-                auth=(self._public_key, self._private_key),
+                auth=httpx.DigestAuth(self._public_key, self._private_key),
                 headers={"Accept": "application/vnd.atlas.2023-01-01+json", "Content-Type": "application/json"},
                 json={"password": new_password},
             )
@@ -67,10 +67,11 @@ class MongoDBRotator:
         self._new_password = new_password
         self._new_uri = _replace_password_in_uri(self._old_uri, new_password)
 
+    @retry(retryable_exceptions=(RotationError,), max_retries=6, base_delay=3.0, cap=30.0)
     def _validate_new_credential(self, session: RotationSession) -> None:
         result = validator.validate_mongodb(self._new_uri)  # type: ignore[arg-type]
         if not result:
-            session.mark_failed()
+            # We don't mark failed here yet because the retry might succeed on the next attempt
             raise RotationError(SERVICE, f"Validation failed: {result.error}")
 
     def _doppler_payload(self) -> dict[str, str]:

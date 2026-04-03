@@ -19,25 +19,33 @@ class ElasticsearchRotator:
     """
     Rotates an Elasticsearch API key using the Security API.
 
+    Master key model: ELASTICSEARCH_USERNAME + ELASTICSEARCH_PASSWORD are admin credentials
+    (never rotated) used to create/delete derived API keys. The rotated key (ELASTICSEARCH_API_KEY)
+    is pushed to Doppler for data operations only.
+
+    Derived key design: Created with empty role_descriptors {} → can authenticate but not
+    authorize API calls (matches Elasticsearch's "API-key-as-child-of-API-key" constraint).
+
     Flow:
-      1. Create a new API key (POST /_security/api_key) authenticated with the current key.
+      1. Create a new derived API key (POST /_security/api_key) using master username/password.
       2. Validate the new key via GET /_cluster/health.
       3. Push ELASTICSEARCH_API_KEY + ELASTICSEARCH_API_KEY_ID to Doppler.
-      4. Invalidate the old key (DELETE /_security/api_key).
+      4. Invalidate the old key (DELETE /_security/api_key) using master credentials (background).
 
-    Cleanup hook: invalidates the freshly-created key on rollback.
+    Cleanup hook: invalidates the freshly-created key on rollback using master credentials.
 
     Env vars:
-      ELASTICSEARCH_HOST        e.g. https://my-cluster.es.io:9243
-      ELASTICSEARCH_API_KEY     base64-encoded "id:api_key" value (the 'encoded' field from create response)
-      ELASTICSEARCH_API_KEY_ID  the ID portion of the current key (used for invalidation)
-      ELASTICSEARCH_KEY_NAME    optional display name for created keys (default: secrets-rot-rotated)
+      ELASTICSEARCH_HOST           e.g. https://my-cluster.es.io:9243
+      ELASTICSEARCH_USERNAME       (never rotated, full permissions to manage keys)
+      ELASTICSEARCH_PASSWORD       (never rotated, full permissions to manage keys)
+      ELASTICSEARCH_API_KEY_ID     optional — ID of current key to delete in finalize
+      ELASTICSEARCH_KEY_NAME       optional display name for created keys (default: secrets-rot-rotated)
     """
 
     REQUIRED_ENV_VARS = [
         "ELASTICSEARCH_HOST",
-        "ELASTICSEARCH_API_KEY",
-        "ELASTICSEARCH_API_KEY_ID",
+        "ELASTICSEARCH_USERNAME",
+        "ELASTICSEARCH_PASSWORD",
     ]
 
     def __init__(self) -> None:
@@ -45,8 +53,9 @@ class ElasticsearchRotator:
 
         env = get_required_env(*self.REQUIRED_ENV_VARS)
         self._host = env["ELASTICSEARCH_HOST"].rstrip("/")
-        self._old_encoded_key = env["ELASTICSEARCH_API_KEY"]
-        self._old_key_id = env["ELASTICSEARCH_API_KEY_ID"]
+        self._username = env["ELASTICSEARCH_USERNAME"]        # Master credentials
+        self._password = env["ELASTICSEARCH_PASSWORD"]        # Master credentials
+        self._old_key_id = os.environ.get("ELASTICSEARCH_API_KEY_ID")
         self._key_name = os.environ.get("ELASTICSEARCH_KEY_NAME", "secrets-rot-rotated")
 
         self._new_encoded_key: str | None = None
@@ -57,7 +66,12 @@ class ElasticsearchRotator:
     # ------------------------------------------------------------------
 
     def _auth_header(self, encoded_key: str | None = None) -> dict[str, str]:
-        return {"Authorization": f"ApiKey {encoded_key or self._old_encoded_key}"}
+        """Basic auth header using username/password, or ApiKey if encoded_key provided."""
+        if encoded_key:
+            return {"Authorization": f"ApiKey {encoded_key}"}
+        # Use basic auth (username:password in base64)
+        creds = base64.b64encode(f"{self._username}:{self._password}".encode()).decode()
+        return {"Authorization": f"Basic {creds}"}
 
     def _url(self, path: str) -> str:
         return f"{self._host}/{path.lstrip('/')}"
@@ -91,7 +105,10 @@ class ElasticsearchRotator:
                 resp = client.post(
                     self._url("/_security/api_key"),
                     headers=self._auth_header(),
-                    json={"name": self._key_name},
+                    json={
+                        "name": self._key_name,
+                        "role_descriptors": {},
+                    },
                 )
             if resp.status_code == 401:
                 raise RotationError(SERVICE, "Current API key is invalid (401). Check ELASTICSEARCH_API_KEY.")
@@ -132,12 +149,15 @@ class ElasticsearchRotator:
         pass  # API keys are effective immediately
 
     def _finalize(self) -> None:
-        """Invalidate the old API key."""
+        """Invalidate the old API key using master key (background cleanup — non-blocking)."""
+        if not self._old_key_id:
+            return
+
         try:
             with httpx.Client(timeout=20) as client:
                 resp = client.delete(
                     self._url("/_security/api_key"),
-                    headers=self._auth_header(self._new_encoded_key),
+                    headers=self._auth_header(),  # master key
                     json={"id": self._old_key_id},
                 )
             if resp.status_code not in (200, 204):
@@ -145,20 +165,22 @@ class ElasticsearchRotator:
                     "[%s] Could not invalidate old key %s: HTTP %d — %s",
                     SERVICE, self._old_key_id, resp.status_code, resp.text[:200],
                 )
+                print(f"[{SERVICE}] ⚠️  Failed to invalidate old key {self._old_key_id} — manual cleanup may be needed.")
             else:
                 print(f"[{SERVICE}] Old API key {self._old_key_id} invalidated.")
         except Exception as exc:
             logger.error("[%s] Finalize failed (old key not invalidated): %s", SERVICE, exc)
+            print(f"[{SERVICE}] ⚠️  Failed to invalidate old key {self._old_key_id} — manual cleanup may be needed.")
 
     def _cleanup(self) -> None:
-        """Invalidate the new API key on rollback."""
+        """Invalidate the new API key on rollback using master key."""
         if not self._new_key_id:
             return
         try:
             with httpx.Client(timeout=20) as client:
                 resp = client.delete(
                     self._url("/_security/api_key"),
-                    headers=self._auth_header(),  # old key still valid (Doppler was rolled back)
+                    headers=self._auth_header(),  # master key (always available)
                     json={"id": self._new_key_id},
                 )
             if resp.status_code not in (200, 204):

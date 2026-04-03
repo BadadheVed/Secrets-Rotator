@@ -122,6 +122,8 @@ class _DeepgramRotator:
         self._master_key = env["DEEPGRAM_MASTER_KEY"]  # Never rotated; used for key management
         self._project_id = env["DEEPGRAM_PROJECT_ID"]
         self._old_key_id = os.environ.get("DEEPGRAM_API_KEY_ID")  # Optional; used in finalize
+        prefix = os.environ.get("KEY_PREFIX", "secrets-rot")
+        self._key_name = f"{prefix}-deepgram"
         self._new_key: str | None = None
         self._new_key_id: str | None = None
 
@@ -130,7 +132,7 @@ class _DeepgramRotator:
             resp = client.post(
                 f"https://api.deepgram.com/v1/projects/{self._project_id}/keys",
                 headers={"Authorization": f"Token {self._master_key}"},
-                json={"comment": "secrets-rot-rotated", "scopes": ["member"]},
+                json={"comment": self._key_name, "scopes": ["member"]},
             )
         if resp.status_code not in (200, 201):
             raise RotationError(self.SERVICE, f"Create key failed: HTTP {resp.status_code} {resp.text[:200]}")

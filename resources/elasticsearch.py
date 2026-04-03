@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 
 import httpx
@@ -23,14 +24,17 @@ class ElasticsearchRotator:
     (never rotated) used to create/delete derived API keys. The rotated key (ELASTICSEARCH_API_KEY)
     is pushed to Doppler for data operations only.
 
+    Key naming strategy: Each new key is given a random UUID name (e.g., "3f2a1b9c4d7e").
+    This name is used as the API_KEY_ID identifier for tracking/deletion.
+
     Derived key design: Created with empty role_descriptors {} → can authenticate but not
     authorize API calls (matches Elasticsearch's "API-key-as-child-of-API-key" constraint).
 
     Flow:
-      1. Create a new derived API key (POST /_security/api_key) using master username/password.
+      1. Generate random ID, create new derived API key with name=ID (POST /_security/api_key).
       2. Validate the new key via GET /_cluster/health.
-      3. Push ELASTICSEARCH_API_KEY + ELASTICSEARCH_API_KEY_ID to Doppler.
-      4. Invalidate the old key (DELETE /_security/api_key) using master credentials (background).
+      3. Push ELASTICSEARCH_API_KEY + ELASTICSEARCH_API_KEY_ID (=random ID) to Doppler.
+      4. Query old key by name (/_security/api_key?name=old_id), then DELETE it.
 
     Cleanup hook: invalidates the freshly-created key on rollback using master credentials.
 
@@ -38,8 +42,7 @@ class ElasticsearchRotator:
       ELASTICSEARCH_HOST           e.g. https://my-cluster.es.io:9243
       ELASTICSEARCH_USERNAME       (never rotated, full permissions to manage keys)
       ELASTICSEARCH_PASSWORD       (never rotated, full permissions to manage keys)
-      ELASTICSEARCH_API_KEY_ID     optional — ID of current key to delete in finalize
-      ELASTICSEARCH_KEY_NAME       optional display name for created keys (default: secrets-rot-rotated)
+      ELASTICSEARCH_API_KEY_ID     optional — random ID of current key (used to find old key for deletion)
     """
 
     REQUIRED_ENV_VARS = [
@@ -50,16 +53,21 @@ class ElasticsearchRotator:
 
     def __init__(self) -> None:
         import os
+        import uuid
 
         env = get_required_env(*self.REQUIRED_ENV_VARS)
         self._host = env["ELASTICSEARCH_HOST"].rstrip("/")
         self._username = env["ELASTICSEARCH_USERNAME"]        # Master credentials
         self._password = env["ELASTICSEARCH_PASSWORD"]        # Master credentials
-        self._old_key_id = os.environ.get("ELASTICSEARCH_API_KEY_ID")
-        self._key_name = os.environ.get("ELASTICSEARCH_KEY_NAME", "secrets-rot-rotated")
 
+        # Old key identifier (random UUID used as the key name when it was created)
+        self._old_key_id = os.environ.get("ELASTICSEARCH_API_KEY_ID")
+
+        # New key naming: {prefix}-elasticsearch-{uuid} — unique for querying/deletion
+        prefix = os.environ.get("KEY_PREFIX", "secrets-rot")
+        self._key_name = f"{prefix}-elasticsearch-{str(uuid.uuid4())[:8]}"  # e.g., "neo-backend-elasticsearch-3f2a1b9c"
+        self._new_key_id: str | None = None     # Actual Elasticsearch API key ID (set in _generate_new_credential)
         self._new_encoded_key: str | None = None
-        self._new_key_id: str | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -141,25 +149,51 @@ class ElasticsearchRotator:
 
     def _doppler_payload(self) -> dict[str, str]:
         return {
-            "ELASTICSEARCH_API_KEY": self._new_encoded_key,   # type: ignore[dict-item]
-            "ELASTICSEARCH_API_KEY_ID": self._new_key_id,     # type: ignore[dict-item]
+            "ELASTICSEARCH_API_KEY": self._new_encoded_key,                  # type: ignore[dict-item]
+            "ELASTICSEARCH_API_KEY_ID": self._key_name,  # e.g. "neo-backend-elasticsearch-3f2a1b9c" — used as key name for deletion lookup
         }
 
     def _watch_rollout(self) -> None:
         pass  # API keys are effective immediately
 
     def _finalize(self) -> None:
-        """Invalidate the old API key using master key (background cleanup — non-blocking)."""
+        """Invalidate the old API key by querying for it by name, then deleting."""
         if not self._old_key_id:
-            return
+            return  # No previous key to delete
 
         try:
             with httpx.Client(timeout=20) as client:
-                resp = client.delete(
+                # Query: find API key with name = old_key_id
+                query_resp = client.get(
                     self._url("/_security/api_key"),
-                    headers=self._auth_header(),  # master key
-                    json={"id": self._old_key_id},
+                    headers=self._auth_header(),  # master credentials
+                    params={"name": self._old_key_id},
                 )
+
+            if query_resp.status_code >= 400:
+                logger.warning(
+                    "[%s] Could not query old key by name %s: HTTP %d",
+                    SERVICE, self._old_key_id, query_resp.status_code,
+                )
+                return
+
+            keys = query_resp.json().get("api_keys", [])
+            if not keys:
+                return  # Old key already deleted or doesn't exist
+
+            # Delete the old key by its ID
+            old_key_actual_id = keys[0].get("id")
+            if not old_key_actual_id:
+                return
+
+            with httpx.Client(timeout=20) as client:
+                resp = client.request(
+                    "DELETE",
+                    self._url("/_security/api_key"),
+                    headers={**self._auth_header(), "Content-Type": "application/json"},
+                    content=json.dumps({"ids": [old_key_actual_id]}),
+                )
+
             if resp.status_code not in (200, 204):
                 logger.warning(
                     "[%s] Could not invalidate old key %s: HTTP %d — %s",
@@ -178,10 +212,11 @@ class ElasticsearchRotator:
             return
         try:
             with httpx.Client(timeout=20) as client:
-                resp = client.delete(
+                resp = client.request(
+                    "DELETE",
                     self._url("/_security/api_key"),
-                    headers=self._auth_header(),  # master key (always available)
-                    json={"id": self._new_key_id},
+                    headers={**self._auth_header(), "Content-Type": "application/json"},
+                    content=json.dumps({"ids": [self._new_key_id]}),
                 )
             if resp.status_code not in (200, 204):
                 raise RotationError(

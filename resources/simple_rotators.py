@@ -18,59 +18,30 @@ logger = logging.getLogger(__name__)
 
 class _AnthropicRotator:
     SERVICE = "anthropic"
-    REQUIRED_ENV_VARS = ["ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_ID"]
+    REQUIRED_ENV_VARS = ["ANTHROPIC_API_KEY"]
 
     def __init__(self) -> None:
         env = get_required_env(*self.REQUIRED_ENV_VARS)
         self._old_key = env["ANTHROPIC_API_KEY"]
-        self._old_key_id = env["ANTHROPIC_API_KEY_ID"]
         self._new_key: str | None = None
-        self._new_key_id: str | None = None
 
     def generate(self) -> None:
-        with httpx.Client(timeout=20) as client:
-            resp = client.post(
-                "https://api.anthropic.com/v1/api_keys",
-                headers={
-                    "x-api-key": self._old_key,
-                    "anthropic-version": "2023-06-01",
-                },
-                json={"name": "secrets-rot-rotated"},
-            )
-        if resp.status_code not in (200, 201):
-            raise RotationError(self.SERVICE, f"Create key failed: HTTP {resp.status_code} {resp.text[:200]}")
-        data = resp.json()
-        self._new_key = data["secret_key"]
-        self._new_key_id = data["id"]
+        import getpass
+        print(f"\n[{self.SERVICE}] Can't be done programmatically.")
+        print("  1. Go to https://console.anthropic.com/settings/keys")
+        print("  2. Create a new API key, then paste it below (input will be hidden).")
+        self._new_key = getpass.getpass("  New Anthropic API key: ").strip()
+        if not self._new_key:
+            raise RotationError(self.SERVICE, "No key entered — rotation aborted.")
 
     def validate(self) -> validator.ValidationResult:
         return validator.validate_simple_key("anthropic", self._new_key)  # type: ignore[arg-type]
 
     def doppler_payload(self) -> dict[str, str]:
-        return {
-            "ANTHROPIC_API_KEY": self._new_key,  # type: ignore[dict-item]
-            "ANTHROPIC_API_KEY_ID": self._new_key_id,  # type: ignore[dict-item]
-        }
+        return {"ANTHROPIC_API_KEY": self._new_key}  # type: ignore[dict-item]
 
     def finalize(self) -> None:
-        """Delete old key."""
-        if not self._old_key_id:
-            return
-        try:
-            with httpx.Client(timeout=20) as client:
-                resp = client.delete(
-                    f"https://api.anthropic.com/v1/api_keys/{self._old_key_id}",
-                    headers={
-                        "x-api-key": self._new_key,
-                        "anthropic-version": "2023-06-01",
-                    },
-                )
-            if resp.status_code not in (200, 204):
-                logger.warning("[%s] Could not delete old key: HTTP %d", self.SERVICE, resp.status_code)
-            else:
-                print(f"[{self.SERVICE}] Old key {self._old_key_id} deleted.")
-        except Exception as exc:
-            logger.error("[%s] Finalize failed: %s", self.SERVICE, exc)
+        print(f"\n[{self.SERVICE}] Remember to revoke the old key at https://console.anthropic.com/settings/keys")
 
 
 # ---------------------------------------------------------------------------
@@ -143,13 +114,14 @@ class _GeminiRotator:
 
 class _DeepgramRotator:
     SERVICE = "deepgram"
-    REQUIRED_ENV_VARS = ["DEEPGRAM_API_KEY", "DEEPGRAM_PROJECT_ID", "DEEPGRAM_API_KEY_ID"]
+    REQUIRED_ENV_VARS = ["DEEPGRAM_MASTER_KEY", "DEEPGRAM_PROJECT_ID"]
 
     def __init__(self) -> None:
+        import os
         env = get_required_env(*self.REQUIRED_ENV_VARS)
-        self._old_key = env["DEEPGRAM_API_KEY"]
-        self._old_key_id = env["DEEPGRAM_API_KEY_ID"]
+        self._master_key = env["DEEPGRAM_MASTER_KEY"]  # Never rotated; used for key management
         self._project_id = env["DEEPGRAM_PROJECT_ID"]
+        self._old_key_id = os.environ.get("DEEPGRAM_API_KEY_ID")  # Optional; used in finalize
         self._new_key: str | None = None
         self._new_key_id: str | None = None
 
@@ -157,7 +129,7 @@ class _DeepgramRotator:
         with httpx.Client(timeout=20) as client:
             resp = client.post(
                 f"https://api.deepgram.com/v1/projects/{self._project_id}/keys",
-                headers={"Authorization": f"Token {self._old_key}"},
+                headers={"Authorization": f"Token {self._master_key}"},
                 json={"comment": "secrets-rot-rotated", "scopes": ["member"]},
             )
         if resp.status_code not in (200, 201):
@@ -178,20 +150,23 @@ class _DeepgramRotator:
         }
 
     def finalize(self) -> None:
+        """Delete old worker key (background cleanup — non-blocking)."""
         if not self._old_key_id:
             return
         try:
             with httpx.Client(timeout=20) as client:
                 resp = client.delete(
                     f"https://api.deepgram.com/v1/projects/{self._project_id}/keys/{self._old_key_id}",
-                    headers={"Authorization": f"Token {self._new_key}"},
+                    headers={"Authorization": f"Token {self._master_key}"},
                 )
             if resp.status_code not in (200, 204):
                 logger.warning("[%s] Could not delete old key: HTTP %d", self.SERVICE, resp.status_code)
+                print(f"[{self.SERVICE}] ⚠️  Failed to delete old key {self._old_key_id} — manual cleanup may be needed.")
             else:
                 print(f"[{self.SERVICE}] Old key {self._old_key_id} deleted.")
         except Exception as exc:
             logger.error("[%s] Finalize failed: %s", self.SERVICE, exc)
+            print(f"[{self.SERVICE}] ⚠️  Failed to delete old key {self._old_key_id} — manual cleanup may be needed.")
 
 
 # ---------------------------------------------------------------------------

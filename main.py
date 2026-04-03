@@ -24,7 +24,7 @@ from resources import (
     FirebaseRotator,
     KafkaGCPRotator,
     MongoDBRotator,
-    rotate_all_simple,
+    SimpleRotator,
 )
 from utils import RotationError
 
@@ -82,10 +82,11 @@ MENU = """\
   6. Azure AD
   7. Azure OpenAI
   8. Apple APNS                   (can't be done programmatically)
-  9. Simple API Keys
-       Anthropic, Deepgram        (programmatic)
-       OpenAI, Gemini             (can't be done programmatically)
- 10. Elasticsearch
+  9. Deepgram                     (programmatic)
+ 10. Anthropic                    (can't be done programmatically)
+ 11. OpenAI                       (can't be done programmatically)
+ 12. Gemini                       (can't be done programmatically)
+ 13. Elasticsearch
   0. Rotate ALL
 
   q. Quit
@@ -93,7 +94,7 @@ MENU = """\
 
 
 def _build_rotator(choice: int):
-    """Instantiate the rotator for a menu choice (1–10). Returns None for simple-keys."""
+    """Instantiate the rotator for a menu choice (1–13)."""
     if choice == 1:
         return ElastiCacheRotator()
     if choice == 2:
@@ -110,24 +111,25 @@ def _build_rotator(choice: int):
         return AzureOpenAIRotator()
     if choice == 8:
         return APNSRotator()
+    if choice == 9:
+        return SimpleRotator("deepgram")
     if choice == 10:
+        return SimpleRotator("anthropic")
+    if choice == 11:
+        return SimpleRotator("openai")
+    if choice == 12:
+        return SimpleRotator("gemini")
+    if choice == 13:
         return ElasticsearchRotator()
-    return None  # choice == 9 handled separately
+    return None
 
 
 def rotate_single(choice: int) -> None:
-    """Rotate a single service (options 1–10)."""
+    """Rotate a single service (options 1–13)."""
     session = rollback.create_session()
     try:
-        if choice == 9:
-            # Simple keys — each sub-rotator registers itself
-            payloads = rotate_all_simple(session)
-            payload: dict[str, str] = {}
-            for p in payloads:
-                payload.update(p)
-        else:
-            rotator = _build_rotator(choice)
-            payload = rotator.rotate(session)
+        rotator = _build_rotator(choice)
+        payload = rotator.rotate(session)
         print("\n✅  Rotation finished successfully.")
         write_last_env(payload)
     except RotationError as exc:
@@ -158,7 +160,6 @@ def rotate_all() -> None:
     print("\n━━━ Phase 1: Generate new credentials ━━━")
     ALL_ROTATORS = [
         ElastiCacheRotator(),
-        ElasticsearchRotator(),
         KafkaGCPRotator(),
         FirebaseRotator(),
         CloudflareRotator(),
@@ -166,6 +167,11 @@ def rotate_all() -> None:
         AzureADRotator(),
         AzureOpenAIRotator(),
         APNSRotator(),
+        SimpleRotator("deepgram"),
+        SimpleRotator("anthropic"),
+        SimpleRotator("openai"),
+        SimpleRotator("gemini"),
+        ElasticsearchRotator(),
     ]
 
     for rotator in ALL_ROTATORS:
@@ -194,26 +200,6 @@ def rotate_all() -> None:
             all_payloads.update(rotator._doppler_payload())  # type: ignore[attr-defined]
         except RotationError as exc:
             print(f"\n❌  Validation failed for {svc}: {exc}")
-            rollback.rollback_session(session)
-            return
-
-    # Simple keys are handled per-sub-service; run generates + validates inline
-    from resources.simple_rotators import _ROTATORS as _SIMPLE
-    simple_instances: dict[str, object] = {}
-    for svc_name, cls in _SIMPLE.items():
-        try:
-            instance = cls()
-            session.register_service(svc_name)
-            print(f"  [{svc_name}] Generating...")
-            instance.generate()
-            print(f"  [{svc_name}] Validating...")
-            result = instance.validate()
-            if not result:
-                raise RotationError(svc_name, f"Validation failed: {result.error}")
-            all_payloads.update(instance.doppler_payload())
-            simple_instances[svc_name] = instance
-        except RotationError as exc:
-            print(f"\n❌  Failed for {svc_name}: {exc}")
             rollback.rollback_session(session)
             return
 
@@ -260,13 +246,6 @@ def rotate_all() -> None:
             logger.error("[%s] Finalize failed (non-fatal): %s", svc, exc)
             print(f"  [{svc}] Finalize warning (manual cleanup may be needed): {exc}")
 
-    for svc_name, instance in simple_instances.items():
-        try:
-            instance.finalize()  # type: ignore[attr-defined]
-        except Exception as exc:
-            logger.error("[%s] Finalize failed (non-fatal): %s", svc_name, exc)
-            print(f"  [{svc_name}] Finalize warning: {exc}")
-
     print("\n✅  All services rotated successfully.")
     write_last_env(all_payloads)
 
@@ -286,8 +265,8 @@ def main() -> None:
             print("Invalid input — please enter a number or 'q'.")
             continue
 
-        if choice not in range(0, 11):
-            print("Please choose a number between 0 and 10.")
+        if choice not in range(0, 14):
+            print("Please choose a number between 0 and 13.")
             continue
 
         if choice == 0:

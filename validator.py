@@ -87,19 +87,19 @@ def validate_kafka_gcp(
 
 
 def validate_firebase(project_id: str, sa_key_json: str) -> ValidationResult:
-    """Validate Firebase service account by listing users (max 1)."""
+    """Validate service account key by making a GCP API call."""
     try:
-        import firebase_admin
-        from firebase_admin import auth, credentials
+        import google.oauth2.service_account as sa_module
+        from googleapiclient.discovery import build
 
         creds_info = json.loads(sa_key_json)
-        cred = credentials.Certificate(creds_info)
-        app_name = f"validation-{project_id}-{int(time.time())}"
-        app = firebase_admin.initialize_app(cred, name=app_name)
-        try:
-            auth.list_users(max_results=1, app=app)
-        finally:
-            firebase_admin.delete_app(app)
+        credentials = sa_module.Credentials.from_service_account_info(
+            creds_info,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+        # Make a simple API call to verify credentials work
+        service = build("iam", "v1", credentials=credentials, cache_discovery=False)
+        service.projects().serviceAccounts().list(name=f"projects/{project_id}").execute()
         return ValidationResult(ok=True)
     except Exception as exc:
         return ValidationResult(ok=False, error=str(exc))

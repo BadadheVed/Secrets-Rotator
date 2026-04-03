@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 
@@ -15,16 +16,20 @@ SERVICE = "firebase"
 
 class FirebaseRotator:
     REQUIRED_ENV_VARS = [
-        "FIREBASE_PROJECT_ID",
-        "FIREBASE_SA_KEY_JSON",
-        "FIREBASE_SA_EMAIL",
+        "FIRE_CREDS_JSON",
     ]
 
     def __init__(self) -> None:
         env = get_required_env(*self.REQUIRED_ENV_VARS)
-        self._project_id = env["FIREBASE_PROJECT_ID"]
-        self._admin_key_json = env["FIREBASE_SA_KEY_JSON"]
-        self._sa_email = env["FIREBASE_SA_EMAIL"]
+        # Decode base64 to get JSON string
+        creds_b64 = env["FIRE_CREDS_JSON"]
+        self._admin_key_json = base64.b64decode(creds_b64).decode("utf-8")
+
+        # Extract project_id and client_email from the JSON
+        creds_dict = json.loads(self._admin_key_json)
+        self._project_id = creds_dict["project_id"]
+        self._sa_email = creds_dict["client_email"]
+
         self._new_key_id: str | None = None
         self._new_key_json: str | None = None
 
@@ -59,22 +64,37 @@ class FirebaseRotator:
             resp = svc.projects().serviceAccounts().keys().create(
                 name=resource, body={"privateKeyType": "TYPE_GOOGLE_CREDENTIALS_FILE"}
             ).execute()
-            import base64
             raw = base64.b64decode(resp["privateKeyData"]).decode("utf-8")
             key_info = json.loads(raw)
             self._new_key_id = key_info["private_key_id"]
             self._new_key_json = raw
+            logger.info("[%s] New key created: %s", SERVICE, self._new_key_id)
+            logger.debug("[%s] New key JSON first 100 chars: %s", SERVICE, raw[:100])
         except Exception as exc:
             raise RotationError(SERVICE, f"Failed to create new SA key: {exc}", cause=exc)
 
     def _validate_new_credential(self, session: RotationSession) -> None:
-        result = validator.validate_firebase(self._project_id, self._new_key_json)  # type: ignore[arg-type]
-        if not result:
-            session.mark_failed()
-            raise RotationError(SERVICE, f"Validation failed: {result.error}")
+        import time
+        # Retry validation — GCP sometimes takes a moment to activate new keys
+        max_retries = 3
+        for attempt in range(max_retries):
+            result = validator.validate_firebase(self._project_id, self._new_key_json)  # type: ignore[arg-type]
+            if result:
+                return
+            # If permission error, wait and retry
+            if "INSUFFICIENT_PERMISSION" in str(result.error) and attempt < max_retries - 1:
+                print(f"[{SERVICE}] Waiting for key activation... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(2)
+            else:
+                break
+
+        session.mark_failed()
+        raise RotationError(SERVICE, f"Validation failed: {result.error}")
 
     def _doppler_payload(self) -> dict[str, str]:
-        return {"FIREBASE_SA_KEY_JSON": self._new_key_json}  # type: ignore[dict-item]
+        # Encode the new key as base64 before pushing to Doppler
+        encoded = base64.b64encode(self._new_key_json.encode()).decode()  # type: ignore[union-attr]
+        return {"FIRE_CREDS_JSON": encoded}
 
     def _watch_rollout(self) -> None:
         pass

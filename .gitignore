@@ -131,3 +131,6 @@ docker-compose.override.yml
 
 # Demo app (contains its own .env)
 app/
+
+# Firebase key dump (written immediately after creation for manual testing)
+firestore/

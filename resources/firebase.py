@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
+from pathlib import Path
 
 import doppler
 import validator
@@ -10,6 +12,8 @@ from rollback import RotationSession
 from utils import RotationError, get_required_env
 
 logger = logging.getLogger(__name__)
+
+CREDS_DUMP_PATH = Path("firestore/creds.json")
 
 SERVICE = "firebase"
 
@@ -76,24 +80,25 @@ class FirebaseRotator:
             self._new_key_id = key_info["private_key_id"]
             self._new_key_json = raw
             logger.info("[%s] New key created: %s", SERVICE, self._new_key_id)
-            logger.debug("[%s] New key JSON first 100 chars: %s", SERVICE, raw[:100])
+            # Dump new key to disk immediately — validation may take up to ~60s to propagate
+            CREDS_DUMP_PATH.parent.mkdir(parents=True, exist_ok=True)
+            CREDS_DUMP_PATH.write_text(raw)
+            print(f"[{SERVICE}] New key saved to {CREDS_DUMP_PATH} (use this if validation times out)")
         except Exception as exc:
             raise RotationError(SERVICE, f"Failed to create new SA key: {exc}", cause=exc)
 
     def _validate_new_credential(self, session: RotationSession) -> None:
         import time
-        # Retry validation — GCP sometimes takes a moment to activate new keys
-        max_retries = 3
-        for attempt in range(max_retries):
+        # GCP SA keys take up to 60s to propagate — retry with backoff
+        delays = [10, 20, 30]  # total wait up to ~60s across 3 retries
+        result = None
+        for attempt, wait in enumerate(delays):
             result = validator.validate_firebase(self._project_id, self._new_key_json)  # type: ignore[arg-type]
             if result:
+                print(f"[{SERVICE}] New SA key validated successfully.")
                 return
-            # If permission error, wait and retry
-            if "INSUFFICIENT_PERMISSION" in str(result.error) and attempt < max_retries - 1:
-                print(f"[{SERVICE}] Waiting for key activation... (attempt {attempt + 1}/{max_retries})")
-                time.sleep(2)
-            else:
-                break
+            print(f"[{SERVICE}] Key not ready yet (attempt {attempt + 1}/{len(delays)}): {result.error} — retrying in {wait}s...")
+            time.sleep(wait)
 
         session.mark_failed()
         raise RotationError(SERVICE, f"Validation failed: {result.error}")

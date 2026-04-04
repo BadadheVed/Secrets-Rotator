@@ -143,7 +143,8 @@ class CloudflareRotator:
             }
             for p in policies
         ]
-        body = {"name": "rotated-token", "policies": clean_policies}
+        prefix = os.environ.get("KEY_PREFIX", "secrets-rot")
+        body = {"name": f"{prefix}-cloudflare", "policies": clean_policies}
         with httpx.Client(timeout=20) as client:
             resp = client.post(f"{CF_BASE}/accounts/{self._account_id}/tokens", headers=self._mgmt_headers(), json=body)
         if resp.status_code not in (200, 201):

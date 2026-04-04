@@ -87,7 +87,7 @@ def validate_kafka_gcp(
 
 
 def validate_firebase(project_id: str, sa_key_json: str) -> ValidationResult:
-    """Validate service account key by making a GCP API call."""
+    """Validate service account key by calling the Firestore databases list endpoint."""
     try:
         import google.oauth2.service_account as sa_module
         from googleapiclient.discovery import build
@@ -97,9 +97,9 @@ def validate_firebase(project_id: str, sa_key_json: str) -> ValidationResult:
             creds_info,
             scopes=["https://www.googleapis.com/auth/cloud-platform"],
         )
-        # Make a simple API call to verify credentials work
-        service = build("iam", "v1", credentials=credentials, cache_discovery=False)
-        service.projects().serviceAccounts().list(name=f"projects/{project_id}").execute()
+        # Use Firestore API — ved-710 has datastore.databases.get, not iam.serviceAccounts.list
+        service = build("firestore", "v1", credentials=credentials, cache_discovery=False)
+        service.projects().databases().list(parent=f"projects/{project_id}").execute()
         return ValidationResult(ok=True)
     except Exception as exc:
         return ValidationResult(ok=False, error=str(exc))

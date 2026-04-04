@@ -90,7 +90,7 @@ MENU = """\
 
 
 def _build_rotator(choice: int):
-    """Instantiate the rotator for a menu choice (1–13)."""
+    """Instantiate the rotator for a menu choice (1–11)."""
     if choice == 1:
         return ElastiCacheRotator()
     if choice == 2:
@@ -102,26 +102,22 @@ def _build_rotator(choice: int):
     if choice == 5:
         return MongoDBRotator()
     if choice == 6:
-        return AzureADRotator()
-    if choice == 7:
-        return AzureOpenAIRotator()
-    if choice == 8:
         return APNSRotator()
-    if choice == 9:
+    if choice == 7:
         return SimpleRotator("deepgram")
-    if choice == 10:
+    if choice == 8:
         return SimpleRotator("anthropic")
-    if choice == 11:
+    if choice == 9:
         return SimpleRotator("openai")
-    if choice == 12:
+    if choice == 10:
         return SimpleRotator("gemini")
-    if choice == 13:
+    if choice == 11:
         return ElasticsearchRotator()
     return None
 
 
 def rotate_single(choice: int) -> None:
-    """Rotate a single service (options 1–13)."""
+    """Rotate a single service (options 1–11)."""
     session = rollback.create_session()
     try:
         rotator = _build_rotator(choice)
@@ -160,8 +156,6 @@ def rotate_all() -> None:
         FirebaseRotator(),
         CloudflareRotator(),
         MongoDBRotator(),
-        AzureADRotator(),
-        AzureOpenAIRotator(),
         APNSRotator(),
         SimpleRotator("deepgram"),
         SimpleRotator("anthropic"),
@@ -261,7 +255,7 @@ def main() -> None:
             print("Invalid input — please enter a number or 'q'.")
             continue
 
-        if choice not in range(0, 14):
+        if choice not in range(0, 12):
             print("Please choose a number between 0 and 13.")
             continue
 

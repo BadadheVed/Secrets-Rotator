@@ -155,37 +155,6 @@ def validate_postgres(host: str, port: int, db: str, user: str, password: str) -
         return ValidationResult(ok=False, error=str(exc))
 
 
-def validate_azure_ad(tenant_id: str, client_id: str, client_secret: str) -> ValidationResult:
-    """Validate Azure AD app credentials by acquiring a token."""
-    try:
-        import msal
-
-        app = msal.ConfidentialClientApplication(
-            client_id,
-            authority=f"https://login.microsoftonline.com/{tenant_id}",
-            client_credential=client_secret,
-        )
-        result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
-        if "access_token" not in result:
-            return ValidationResult(ok=False, error=result.get("error_description", str(result)))
-        return ValidationResult(ok=True)
-    except Exception as exc:
-        return ValidationResult(ok=False, error=str(exc))
-
-
-def validate_azure_openai(endpoint: str, api_key: str) -> ValidationResult:
-    """Validate Azure OpenAI key by listing models."""
-    try:
-        url = endpoint.rstrip("/") + "/openai/models?api-version=2024-02-01"
-        with httpx.Client(timeout=10) as client:
-            resp = client.get(url, headers={"api-key": api_key})
-        if resp.status_code >= 400:
-            return ValidationResult(ok=False, error=f"HTTP {resp.status_code}: {resp.text[:200]}")
-        return ValidationResult(ok=True)
-    except Exception as exc:
-        return ValidationResult(ok=False, error=str(exc))
-
-
 def validate_apns(team_id: str, key_id: str, private_key_pem: str, bundle_id: str) -> ValidationResult:
     """Validate APNs credentials by connecting to the sandbox gateway."""
     try:

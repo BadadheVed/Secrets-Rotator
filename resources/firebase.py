@@ -16,19 +16,26 @@ SERVICE = "firebase"
 
 class FirebaseRotator:
     REQUIRED_ENV_VARS = [
-        "FIRE_CREDS_JSON",
+        "FIRE_CREDS_ROTATER_JSON",  # firebase-rotation-admin key (creates/deletes keys)
+        "FIRE_CREDS_JSON",          # ved-710 app key (the one being rotated)
     ]
 
     def __init__(self) -> None:
         env = get_required_env(*self.REQUIRED_ENV_VARS)
-        # Decode base64 to get JSON string
-        creds_b64 = env["FIRE_CREDS_JSON"]
-        self._admin_key_json = base64.b64decode(creds_b64).decode("utf-8")
 
-        # Extract project_id and client_email from the JSON
-        creds_dict = json.loads(self._admin_key_json)
-        self._project_id = creds_dict["project_id"]
-        self._sa_email = creds_dict["client_email"]
+        # Rotation admin key — used to authenticate to GCP IAM API
+        rotater_b64 = env["FIRE_CREDS_ROTATER_JSON"]
+        self._admin_key_json = base64.b64decode(rotater_b64).decode("utf-8")
+
+        # App key (ved-710) — extract project_id and client_email to know which SA to rotate
+        app_b64 = env["FIRE_CREDS_JSON"]
+        app_key_json = base64.b64decode(app_b64).decode("utf-8")
+        app_creds = json.loads(app_key_json)
+        self._project_id = app_creds["project_id"]
+        self._sa_email = app_creds["client_email"]
+
+        # Store old key id for deletion during finalize
+        self._old_key_id: str | None = app_creds.get("private_key_id")
 
         self._new_key_id: str | None = None
         self._new_key_json: str | None = None
@@ -102,16 +109,14 @@ class FirebaseRotator:
     def _finalize(self) -> None:
         """Delete the old SA key."""
         try:
-            old_info = json.loads(self._admin_key_json)
-            old_key_id = old_info.get("private_key_id")
-            if not old_key_id:
+            if not self._old_key_id:
                 return
             svc = self._iam_service()
             resource = (
-                f"projects/{self._project_id}/serviceAccounts/{self._sa_email}/keys/{old_key_id}"
+                f"projects/{self._project_id}/serviceAccounts/{self._sa_email}/keys/{self._old_key_id}"
             )
             svc.projects().serviceAccounts().keys().delete(name=resource).execute()
-            print(f"[{SERVICE}] Old SA key {old_key_id} deleted.")
+            print(f"[{SERVICE}] Old SA key {self._old_key_id} deleted.")
         except Exception as exc:
             logger.error("[%s] Failed to delete old SA key: %s", SERVICE, exc)
 

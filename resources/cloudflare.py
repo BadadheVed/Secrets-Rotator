@@ -22,25 +22,25 @@ class CloudflareRotator:
     """
     Two-token rotation pattern:
 
-    CLOUDFLARE_MASTER_TOKEN  — master token, never rotated.
-                                 Needs: User > API Tokens > Read + Edit
+    CLOUDFLARE_MASTER_TOKEN  — account-level master token, never rotated.
+                                 Needs: Account > API Tokens > Edit
                                  Used by this rotator to create/delete app tokens.
 
-    CLOUDFLARE_API_TOKEN       — app token, gets rotated each run.
+    CLOUDFLARE_API_TOKEN       — account-level app token, gets rotated each run.
                                  Needs: Zone Read (or whatever your app needs).
                                  NO token-management permissions (Cloudflare forbids it).
     """
 
     REQUIRED_ENV_VARS = [
-        "CLOUDFLARE_MASTER_TOKEN",
-        "CLOUDFLARE_ACCOUNT_ID",
+        "CF_MASTER_TOKEN",
+        "CF_ACCOUNT_ID",
     ]
 
     def __init__(self) -> None:
         env = get_required_env(*self.REQUIRED_ENV_VARS)
-        self._rotation_token = env["CLOUDFLARE_MASTER_TOKEN"]       # master — stays forever
-        self._old_token: str | None = os.environ.get("CLOUDFLARE_API_TOKEN")  # None = bootstrap
-        self._account_id = env["CLOUDFLARE_ACCOUNT_ID"]
+        self._rotation_token = env["CF_MASTER_TOKEN"]       # master — stays forever
+        self._old_token: str | None = os.environ.get("CF_API_TOKEN")  # None = bootstrap
+        self._account_id = env["CF_ACCOUNT_ID"]
         self._old_token_id: str | None = None
         self._new_token: str | None = None
         self._new_token_id: str | None = None
@@ -59,11 +59,11 @@ class CloudflareRotator:
         return {"Authorization": f"Bearer {token or self._old_token}"}
 
     def _fetch_current_token_id(self) -> None:
-        """Get the app token's ID by calling GET /user/tokens/verify with the app token."""
+        """Get the app token's ID by calling GET /accounts/{id}/tokens/verify with the app token."""
         try:
             with httpx.Client(timeout=20) as client:
                 resp = client.get(
-                    f"{CF_BASE}/user/tokens/verify",
+                    f"{CF_BASE}/accounts/{self._account_id}/tokens/verify",
                     headers=self._app_headers(),
                 )
             if resp.status_code == 200:
@@ -86,18 +86,18 @@ class CloudflareRotator:
         In bootstrap mode (no old token), falls back to CLOUDFLARE_TOKEN_POLICY_JSON."""
         # Bootstrap mode: no existing app token to read policies from
         if not self._old_token_id:
-            policy_json = os.environ.get("CLOUDFLARE_TOKEN_POLICY_JSON")
+            policy_json = os.environ.get("CF_TOKEN_POLICY_JSON")
             if policy_json:
-                logger.info("[%s] Bootstrap mode: using CLOUDFLARE_TOKEN_POLICY_JSON.", SERVICE)
+                logger.info("[%s] Bootstrap mode: using CF_TOKEN_POLICY_JSON.", SERVICE)
                 return json.loads(policy_json)
             raise RotationError(
                 SERVICE,
-                "Bootstrap mode requires CLOUDFLARE_TOKEN_POLICY_JSON to be set (no existing app token to clone policies from).",
+                "Bootstrap mode requires CF_TOKEN_POLICY_JSON to be set (no existing app token to clone policies from).",
             )
 
         with httpx.Client(timeout=20) as client:
             resp = client.get(
-                f"{CF_BASE}/user/tokens/{self._old_token_id}",
+                f"{CF_BASE}/accounts/{self._account_id}/tokens/{self._old_token_id}",
                 headers=self._mgmt_headers(),
             )
         if resp.status_code == 200:
@@ -105,14 +105,14 @@ class CloudflareRotator:
             return data.get("result", {}).get("policies", [])
 
         # Fallback: load from env var
-        policy_json = os.environ.get("CLOUDFLARE_TOKEN_POLICY_JSON")
+        policy_json = os.environ.get("CF_TOKEN_POLICY_JSON")
         if policy_json:
-            logger.warning("[%s] Cannot list token policies (HTTP %d), using CLOUDFLARE_TOKEN_POLICY_JSON.", SERVICE, resp.status_code)
+            logger.warning("[%s] Cannot list token policies (HTTP %d), using CF_TOKEN_POLICY_JSON.", SERVICE, resp.status_code)
             return json.loads(policy_json)
 
         raise RotationError(
             SERVICE,
-            f"Cannot retrieve token policies (HTTP {resp.status_code}) and CLOUDFLARE_TOKEN_POLICY_JSON is not set.",
+            f"Cannot retrieve token policies (HTTP {resp.status_code}) and CF_TOKEN_POLICY_JSON is not set.",
         )
 
     def rotate(self, session: RotationSession) -> dict[str, str]:
@@ -145,7 +145,7 @@ class CloudflareRotator:
         ]
         body = {"name": "rotated-token", "policies": clean_policies}
         with httpx.Client(timeout=20) as client:
-            resp = client.post(f"{CF_BASE}/user/tokens", headers=self._mgmt_headers(), json=body)
+            resp = client.post(f"{CF_BASE}/accounts/{self._account_id}/tokens", headers=self._mgmt_headers(), json=body)
         if resp.status_code not in (200, 201):
             raise RotationError(SERVICE, f"Failed to create new token: HTTP {resp.status_code} {resp.text[:300]}")
         result = resp.json().get("result", {})
@@ -155,16 +155,23 @@ class CloudflareRotator:
             raise RotationError(SERVICE, "New token creation response missing value/id.")
 
     def _validate_new_credential(self, session: RotationSession) -> None:
-        result = validator.validate_cloudflare(self._new_token)  # type: ignore[arg-type]
+        result = validator.validate_cloudflare(self._new_token, self._account_id)  # type: ignore[arg-type]
         if not result:
             session.mark_failed()
             raise RotationError(SERVICE, f"Validation failed: {result.error}")
 
     def _doppler_payload(self) -> dict[str, str]:
-        return {
-            "CLOUDFLARE_API_TOKEN": self._new_token,       # type: ignore[dict-item]
-            "CLOUDFLARE_API_TOKEN_ID": self._new_token_id, # type: ignore[dict-item]
+        payload: dict[str, str] = {
+            "CF_API_KEY": self._new_token,        # type: ignore[dict-item]
+            "CF_API_TOKEN_ID": self._new_token_id, # type: ignore[dict-item]
+            "CF_ACCOUNT_ID": self._account_id,
         }
+        # Push static vars to Doppler if set in env
+        for key in ("CF_KV_NAMESPACE_ID", "CF_EMAIL"):
+            val = os.environ.get(key)
+            if val:
+                payload[key] = val
+        return payload
 
     def _watch_rollout(self) -> None:
         pass
@@ -177,7 +184,7 @@ class CloudflareRotator:
         try:
             with httpx.Client(timeout=20) as client:
                 resp = client.delete(
-                    f"{CF_BASE}/user/tokens/{self._old_token_id}",
+                    f"{CF_BASE}/accounts/{self._account_id}/tokens/{self._old_token_id}",
                     headers=self._mgmt_headers(),
                 )
             if resp.status_code not in (200, 204):
@@ -194,7 +201,7 @@ class CloudflareRotator:
         try:
             with httpx.Client(timeout=20) as client:
                 resp = client.delete(
-                    f"{CF_BASE}/user/tokens/{self._new_token_id}",
+                    f"{CF_BASE}/accounts/{self._account_id}/tokens/{self._new_token_id}",
                     headers=self._mgmt_headers(),
                 )
             if resp.status_code not in (200, 204):

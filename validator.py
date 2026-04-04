@@ -105,12 +105,12 @@ def validate_firebase(project_id: str, sa_key_json: str) -> ValidationResult:
         return ValidationResult(ok=False, error=str(exc))
 
 
-def validate_cloudflare(api_token: str) -> ValidationResult:
-    """Verify Cloudflare API token via the verify endpoint."""
+def validate_cloudflare(api_token: str, account_id: str) -> ValidationResult:
+    """Verify Cloudflare account API token via the account verify endpoint."""
     try:
         with httpx.Client(timeout=10) as client:
             resp = client.get(
-                "https://api.cloudflare.com/client/v4/user/tokens/verify",
+                f"https://api.cloudflare.com/client/v4/accounts/{account_id}/tokens/verify",
                 headers={"Authorization": f"Bearer {api_token}"},
             )
         body = resp.json()
